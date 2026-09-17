@@ -2,26 +2,24 @@
 
 namespace WHMCS\Module\Notification\Telegram;
 
-
-use WHMCS\Config\Setting;
-use WHMCS\Exception; 
-use WHMCS\Module\Notification\DescriptionTrait;
+use GuzzleHttp\Exception\TransferException;
+use WHMCS\Exception;
+use WHMCS\Http\Client\HttpClient;
 use WHMCS\Module\Contracts\NotificationModuleInterface;
+use WHMCS\Module\Notification\DescriptionTrait;
 use WHMCS\Notification\Contracts\NotificationInterface;
-
 
 class Telegram implements NotificationModuleInterface
 {
-	use DescriptionTrait;
-	
+    use DescriptionTrait;
+
     public function __construct()
     {
         $this->setDisplayName('Telegram')
             ->setLogoFileName('logo.png');
     }
 
-
-	public function settings()
+    public function settings()
     {
         return [
             'botToken' => [
@@ -39,43 +37,106 @@ class Telegram implements NotificationModuleInterface
         ];
     }
 
-	
-	public function testConnection($settings)
+    public function testConnection($settings)
     {
-		$botToken = $settings['botToken'];
-		$botChatID = $settings['botChatID'];
-		
-		$message = urlencode("Connected with WHMCS");
-		$response = file_get_contents("https://api.telegram.org/bot".$botToken."/sendMessage?chat_id=".$botChatID."&text=".$message);
-
-        if (!$response) { 
-			throw new Exception('No response received from API');
-		}
+        $this->sendTelegramMessage(
+            $settings['botToken'],
+            $settings['botChatID'],
+            'Connected with WHMCS'
+        );
     }
 
-	public function notificationSettings()
-	{
-		return [];
-	}
-	
-	public function getDynamicField($fieldName, $settings)
-	{
-		return [];
-	}
-
-
-	public function sendNotification(NotificationInterface $notification, $moduleSettings, $notificationSettings)
+    public function notificationSettings()
     {
-        $botToken = $moduleSettings['botToken'];
-		$botChatID = $moduleSettings['botChatID'];
-		
-		$messageContent = "*". $notification->getTitle() ."*\n\n". $notification->getMessage() ."\n\n[Open »](". $notification->getUrl() .")";
-		
-		$message = urlencode($messageContent);
-		$response = file_get_contents("https://api.telegram.org/bot".$botToken."/sendMessage?parse_mode=Markdown&chat_id=".$botChatID."&text=".$message);
-		
-        if (!$response) { 
-			throw new Exception('No response received from API');
-		}
+        return [];
+    }
+
+    public function getDynamicField($fieldName, $settings)
+    {
+        return [];
+    }
+
+    public function sendNotification(NotificationInterface $notification, $moduleSettings, $notificationSettings)
+    {
+        $message = "*" . $notification->getTitle() . "*\n\n"
+            . $notification->getMessage() . "\n\n"
+            . "[Open »](" . $notification->getUrl() . ")";
+
+        $this->sendTelegramMessage(
+            $moduleSettings['botToken'],
+            $moduleSettings['botChatID'],
+            $message,
+            'Markdown'
+        );
+    }
+
+    /**
+     * Send a message through Telegram and validate both HTTP and API responses.
+     *
+     * @param string      $botToken
+     * @param string      $chatId
+     * @param string      $message
+     * @param string|null $parseMode
+     *
+     * @throws Exception
+     */
+    private function sendTelegramMessage($botToken, $chatId, $message, $parseMode = null)
+    {
+        $client = new HttpClient();
+        $formParams = [
+            'chat_id' => $chatId,
+            'text' => $message,
+        ];
+
+        if ($parseMode !== null) {
+            $formParams['parse_mode'] = $parseMode;
+        }
+
+        try {
+            $response = $client->post(
+                'https://api.telegram.org/bot' . $botToken . '/sendMessage',
+                [
+                    'connect_timeout' => 5,
+                    'timeout' => 10,
+                    'http_errors' => false,
+                    'form_params' => $formParams,
+                ]
+            );
+        } catch (TransferException $exception) {
+            // Do not expose the request URL because it contains the bot token.
+            throw new Exception('Unable to connect to the Telegram API.');
+        }
+
+        $statusCode = $response->getStatusCode();
+        $responseBody = (string) $response->getBody();
+        $responseData = json_decode($responseBody, true);
+
+        if (is_array($responseData) && isset($responseData['ok']) && $responseData['ok'] === false) {
+            $errorCode = isset($responseData['error_code']) ? $responseData['error_code'] : 'unknown';
+            $description = isset($responseData['description']) ? $responseData['description'] : 'Unknown error';
+            $errorMessage = sprintf(
+                'Telegram API error (error_code: %s, description: %s',
+                $errorCode,
+                $description
+            );
+
+            if (isset($responseData['parameters']['retry_after'])) {
+                $errorMessage .= sprintf(', retry_after: %s', $responseData['parameters']['retry_after']);
+            }
+
+            if ($botToken !== '') {
+                $errorMessage = str_replace($botToken, '[redacted]', $errorMessage);
+            }
+
+            throw new Exception($errorMessage . ').');
+        }
+
+        if ($statusCode < 200 || $statusCode >= 300) {
+            throw new Exception(sprintf('Telegram API returned HTTP status %d.', $statusCode));
+        }
+
+        if (!is_array($responseData) || !isset($responseData['ok']) || $responseData['ok'] !== true) {
+            throw new Exception('Telegram API returned an invalid response.');
+        }
     }
 }
