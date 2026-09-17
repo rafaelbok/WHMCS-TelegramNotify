@@ -16,6 +16,7 @@ class Telegram implements NotificationModuleInterface
     const MAX_SEND_ATTEMPTS = 3;
     const RETRY_BASE_DELAY_MICROSECONDS = 250000;
     const RETRY_MAX_DELAY_MICROSECONDS = 2000000;
+    const MAX_MESSAGE_LENGTH = 4096;
 
     public function __construct()
     {
@@ -62,9 +63,11 @@ class Telegram implements NotificationModuleInterface
 
     public function sendNotification(NotificationInterface $notification, $moduleSettings, $notificationSettings)
     {
-        $messageContent = $notification->getTitle() . "\n\n"
-            . $notification->getMessage() . "\n\n"
-            . "Open » " . $notification->getUrl();
+        $messageContent = $this->buildNotificationMessage(
+            $notification->getTitle(),
+            $notification->getMessage(),
+            $notification->getUrl()
+        );
 
         $this->sendTelegramMessage(
             $moduleSettings['botToken'],
@@ -85,6 +88,8 @@ class Telegram implements NotificationModuleInterface
      */
     private function sendTelegramMessage($botToken, $chatId, $message, $parseMode = null)
     {
+        $message = $this->limitMessage($message, 'truncate_safe');
+
         $client = new HttpClient();
         $formParams = [
             'chat_id' => $chatId,
@@ -163,6 +168,143 @@ class Telegram implements NotificationModuleInterface
 
             return;
         }
+    }
+
+    /**
+     * Build a notification message within Telegram's 4096-character text limit.
+     * The body is truncated first so the title and URL remain available.
+     *
+     * @param string $title
+     * @param string $message
+     * @param string $url
+     *
+     * @return string
+     */
+    private function buildNotificationMessage($title, $message, $url)
+    {
+        $prefix = $title . "\n\n";
+        $suffix = "\n\nOpen » " . $url;
+        $messageContent = $prefix . $message . $suffix;
+        $messageLength = $this->unicodeLength($messageContent);
+
+        if ($messageLength <= self::MAX_MESSAGE_LENGTH) {
+            return $messageContent;
+        }
+
+        $bodyBudget = self::MAX_MESSAGE_LENGTH
+            - $this->unicodeLength($prefix)
+            - $this->unicodeLength($suffix);
+
+        if ($bodyBudget > 0) {
+            $this->logMessageLimit($messageLength, 'truncate_preserving_title_and_url');
+
+            return $prefix . $this->truncateSafely($message, $bodyBudget) . $suffix;
+        }
+
+        // Extremely long titles or URLs cannot both be retained in full. Keep a
+        // safe, explicit truncation of each rather than sending an oversized value.
+        $titleBudget = (int) floor((self::MAX_MESSAGE_LENGTH - $this->unicodeLength("\n\nOpen » ")) / 2);
+        $urlBudget = self::MAX_MESSAGE_LENGTH - $this->unicodeLength("\n\nOpen » ") - $titleBudget;
+        $this->logMessageLimit($messageLength, 'truncate_title_and_url_safely');
+
+        return $this->truncateSafely($title, $titleBudget)
+            . "\n\nOpen » "
+            . $this->truncateSafely($url, $urlBudget);
+    }
+
+    /**
+     * Limit arbitrary messages passed directly to the sender.
+     *
+     * @param string $message
+     * @param string $strategy
+     *
+     * @return string
+     */
+    private function limitMessage($message, $strategy)
+    {
+        $messageLength = $this->unicodeLength($message);
+
+        if ($messageLength <= self::MAX_MESSAGE_LENGTH) {
+            return $message;
+        }
+
+        $this->logMessageLimit($messageLength, $strategy);
+
+        return $this->truncateSafely($message, self::MAX_MESSAGE_LENGTH);
+    }
+
+    /**
+     * Truncate on Unicode code-point boundaries, treating Markdown escapes and
+     * HTML entities as indivisible units so formatted output is not cut mid-token.
+     *
+     * @param string $message
+     * @param int    $maximumLength
+     *
+     * @return string
+     */
+    private function truncateSafely($message, $maximumLength)
+    {
+        if ($this->unicodeLength($message) <= $maximumLength) {
+            return $message;
+        }
+
+        if ($maximumLength < 1) {
+            return '';
+        }
+
+        $ellipsis = '…';
+        $contentBudget = $maximumLength - $this->unicodeLength($ellipsis);
+        if ($contentBudget < 1) {
+            return $ellipsis;
+        }
+
+        preg_match_all(
+            '/\\\\.|&(?:#[0-9]+|#x[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);|./us',
+            $message,
+            $matches
+        );
+
+        $truncated = '';
+        $length = 0;
+        foreach ($matches[0] as $token) {
+            $tokenLength = $this->unicodeLength($token);
+            if ($length + $tokenLength > $contentBudget) {
+                break;
+            }
+
+            $truncated .= $token;
+            $length += $tokenLength;
+        }
+
+        return $truncated . $ellipsis;
+    }
+
+    /**
+     * Count Unicode code points without depending on the mbstring extension.
+     *
+     * @param string $message
+     *
+     * @return int
+     */
+    private function unicodeLength($message)
+    {
+        if (preg_match_all('/./us', $message, $matches) !== false) {
+            return count($matches[0]);
+        }
+
+        return strlen($message);
+    }
+
+    /**
+     * Record only diagnostics that are safe for notification content.
+     */
+    private function logMessageLimit($messageLength, $strategy)
+    {
+        error_log(sprintf(
+            'Telegram notification content limited: length=%d, strategy=%s.',
+            $messageLength,
+            $strategy
+        ));
     }
 
     /**
