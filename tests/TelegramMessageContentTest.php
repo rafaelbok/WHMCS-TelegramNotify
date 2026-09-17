@@ -16,10 +16,22 @@ namespace WHMCS\Http\Client {
     class HttpClient
     {
         public static $lastRequest;
+        public static $requests = [];
+        public static $responseQueue = [];
 
         public function post($url, array $options)
         {
             self::$lastRequest = [$url, $options];
+            self::$requests[] = self::$lastRequest;
+
+            if (self::$responseQueue) {
+                $response = array_shift(self::$responseQueue);
+                if ($response instanceof \Exception) {
+                    throw $response;
+                }
+
+                return $response;
+            }
 
             return new Response();
         }
@@ -27,14 +39,23 @@ namespace WHMCS\Http\Client {
 
     class Response
     {
+        private $statusCode;
+        private $body;
+
+        public function __construct($statusCode = 200, $body = '{"ok":true}')
+        {
+            $this->statusCode = $statusCode;
+            $this->body = $body;
+        }
+
         public function getStatusCode()
         {
-            return 200;
+            return $this->statusCode;
         }
 
         public function getBody()
         {
-            return '{"ok":true}';
+            return $this->body;
         }
     }
 }
@@ -67,7 +88,9 @@ namespace WHMCS\Notification\Contracts {
 }
 
 namespace {
+    use GuzzleHttp\Exception\TransferException;
     use WHMCS\Http\Client\HttpClient;
+    use WHMCS\Http\Client\Response;
     use WHMCS\Module\Notification\Telegram\Telegram;
     use WHMCS\Notification\Contracts\NotificationInterface;
 
@@ -173,6 +196,47 @@ namespace {
             'parse_mode' => 'MarkdownV2',
         ]) {
         throw new \RuntimeException('Parse mode must be sent as a form parameter when provided.');
+    }
+
+    HttpClient::$requests = [];
+    HttpClient::$responseQueue = [
+        new Response(429, '{"ok":false,"error_code":429,"parameters":{"retry_after":0}}'),
+        new Response(),
+    ];
+    $telegram->testConnection(['botToken' => 'test-token', 'botChatID' => 'test-chat']);
+    if (count(HttpClient::$requests) !== 2) {
+        throw new \RuntimeException('HTTP 429 with retry_after must be retried once.');
+    }
+
+    HttpClient::$requests = [];
+    HttpClient::$responseQueue = [
+        new Response(503, '{"ok":false,"error_code":503}'),
+        new Response(),
+    ];
+    $telegram->testConnection(['botToken' => 'test-token', 'botChatID' => 'test-chat']);
+    if (count(HttpClient::$requests) !== 2) {
+        throw new \RuntimeException('HTTP 5xx must be retried once.');
+    }
+
+    HttpClient::$requests = [];
+    HttpClient::$responseQueue = [
+        new TransferException('connection failed'),
+        new Response(),
+    ];
+    $telegram->testConnection(['botToken' => 'test-token', 'botChatID' => 'test-chat']);
+    if (count(HttpClient::$requests) !== 2) {
+        throw new \RuntimeException('Connection transfer failures must be retried once.');
+    }
+
+    HttpClient::$requests = [];
+    HttpClient::$responseQueue = [new Response(400, '{"ok":false,"error_code":400,"description":"Bad Request"}')];
+    try {
+        $telegram->testConnection(['botToken' => 'test-token', 'botChatID' => 'test-chat']);
+        throw new \RuntimeException('HTTP 4xx must fail.');
+    } catch (\WHMCS\Exception $exception) {
+        if (count(HttpClient::$requests) !== 1) {
+            throw new \RuntimeException('HTTP 4xx must not be retried.');
+        }
     }
 
     echo "Telegram message content checks passed.\n";
