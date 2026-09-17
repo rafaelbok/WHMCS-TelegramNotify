@@ -132,6 +132,14 @@ namespace {
             throw new \RuntimeException('Unexpected request URL in case ' . $caseNumber);
         }
 
+        if (strpos($requestUrl, '?') !== false) {
+            throw new \RuntimeException('Request URL must not include message parameters in case ' . $caseNumber);
+        }
+
+        if ($formParams['chat_id'] !== 'test-chat') {
+            throw new \RuntimeException('Chat ID must be sent as form data in case ' . $caseNumber);
+        }
+
         if ($formParams['text'] !== $expected) {
             throw new \RuntimeException('Message content changed in case ' . $caseNumber);
         }
@@ -139,6 +147,32 @@ namespace {
         if (array_key_exists('parse_mode', $formParams)) {
             throw new \RuntimeException('parse_mode must not be sent in case ' . $caseNumber);
         }
+    }
+
+    $telegram = new Telegram();
+    $telegram->testConnection(['botToken' => 'test-token', 'botChatID' => 'test-chat']);
+    list($requestUrl, $options) = HttpClient::$lastRequest;
+
+    if ($requestUrl !== 'https://api.telegram.org/bottest-token/sendMessage'
+        || $options['form_params'] !== [
+            'chat_id' => 'test-chat',
+            'text' => 'Connected with WHMCS',
+        ]) {
+        throw new \RuntimeException('Connection test must send its data as form parameters.');
+    }
+
+    $method = new \ReflectionMethod(Telegram::class, 'sendTelegramMessage');
+    $method->setAccessible(true);
+    $method->invoke($telegram, 'test-token', 'test-chat', 'Formatted message', 'MarkdownV2');
+    list($requestUrl, $options) = HttpClient::$lastRequest;
+
+    if ($requestUrl !== 'https://api.telegram.org/bottest-token/sendMessage'
+        || $options['form_params'] !== [
+            'chat_id' => 'test-chat',
+            'text' => 'Formatted message',
+            'parse_mode' => 'MarkdownV2',
+        ]) {
+        throw new \RuntimeException('Parse mode must be sent as a form parameter when provided.');
     }
 
     echo "Telegram message content checks passed.\n";

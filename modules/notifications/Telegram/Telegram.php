@@ -91,9 +91,12 @@ class Telegram implements NotificationModuleInterface
             $formParams['parse_mode'] = $parseMode;
         }
 
+        // Keep message parameters out of the URL: the endpoint also contains the bot token.
+        $endpoint = 'https://api.telegram.org/bot' . $botToken . '/sendMessage';
+
         try {
             $response = $client->post(
-                'https://api.telegram.org/bot' . $botToken . '/sendMessage',
+                $endpoint,
                 [
                     'connect_timeout' => 5,
                     'timeout' => 10,
