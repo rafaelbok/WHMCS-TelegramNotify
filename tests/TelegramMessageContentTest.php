@@ -198,6 +198,38 @@ namespace {
         throw new \RuntimeException('Parse mode must be sent as a form parameter when provided.');
     }
 
+    $longTitle = 'Title 🚀';
+    $longUrl = 'https://example.test/notification';
+    $telegram->sendNotification(
+        new TestNotification($longTitle, str_repeat('🚀', 5000), $longUrl),
+        ['botToken' => 'test-token', 'botChatID' => 'test-chat'],
+        []
+    );
+    $limitedMessage = HttpClient::$lastRequest[1]['form_params']['text'];
+    preg_match_all('/./us', $limitedMessage, $unicodeCharacters);
+    if (count($unicodeCharacters[0]) > 4096) {
+        throw new \RuntimeException('Notification messages must not exceed Telegram\'s Unicode character limit.');
+    }
+    if (strpos($limitedMessage, $longTitle . "\n\n") !== 0
+        || substr($limitedMessage, -strlen("\n\nOpen » " . $longUrl)) !== "\n\nOpen » " . $longUrl
+    ) {
+        throw new \RuntimeException('Long notification messages must retain their title and URL.');
+    }
+
+    $method->invoke($telegram, 'test-token', 'test-chat', str_repeat('a', 4094) . '&amp;', 'HTML');
+    $limitedMessage = HttpClient::$lastRequest[1]['form_params']['text'];
+    if (substr($limitedMessage, -strlen('…')) !== '…' || strpos($limitedMessage, '&') !== false) {
+        throw new \RuntimeException('Message truncation must not split an HTML entity.');
+    }
+
+    $method->invoke($telegram, 'test-token', 'test-chat', str_repeat('a', 4095) . '\\*', 'MarkdownV2');
+    $limitedMessage = HttpClient::$lastRequest[1]['form_params']['text'];
+    if (substr($limitedMessage, -strlen('…')) !== '…'
+        || substr($limitedMessage, -strlen('…') - 1, 1) === '\\'
+    ) {
+        throw new \RuntimeException('Message truncation must not split a Markdown escape sequence.');
+    }
+
     HttpClient::$requests = [];
     HttpClient::$responseQueue = [
         new Response(429, '{"ok":false,"error_code":429,"parameters":{"retry_after":0}}'),
