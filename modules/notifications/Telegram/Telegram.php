@@ -58,15 +58,14 @@ class Telegram implements NotificationModuleInterface
 
     public function sendNotification(NotificationInterface $notification, $moduleSettings, $notificationSettings)
     {
-        $message = "*" . $notification->getTitle() . "*\n\n"
+        $messageContent = $notification->getTitle() . "\n\n"
             . $notification->getMessage() . "\n\n"
-            . "[Open »](" . $notification->getUrl() . ")";
+            . "Open » " . $notification->getUrl();
 
         $this->sendTelegramMessage(
             $moduleSettings['botToken'],
             $moduleSettings['botChatID'],
-            $message,
-            'Markdown'
+            $messageContent
         );
     }
 
